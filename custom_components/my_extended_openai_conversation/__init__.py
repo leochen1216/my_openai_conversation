@@ -30,7 +30,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import ulid
 
 # LangChain imports
-from langchain import init_chat_model
+from langchain.chat_models.base import init_chat_model
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -40,10 +40,13 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 from openai._exceptions import AuthenticationError, OpenAIError
+from openai.types import CompletionUsage
 from openai.types.chat.chat_completion import (
     ChatCompletion,
+    Choice,
 )
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from pydantic import BaseModel, Field
 
 from .const import (
     CONF_API_VERSION,
@@ -80,18 +83,35 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 DATA_AGENT = "agent"
 
 
-# Global execute_services tool definition for use with LangGraph
-@tool
-async def execute_services(service_calls: list[dict]) -> str:
-    """Execute service calls in Home Assistant.
+# Pydantic models for execute_services tool
+class ServiceData(BaseModel):
+    """Service data model."""
 
-    Args:
-        service_calls: Array of service calls with domain, service, and service_data.
-                      Each service call should have:
-                      - domain: The domain of the service (e.g., 'light', 'switch')
-                      - service: The service to be called (e.g., 'turn_on', 'turn_off')
-                      - service_data: Object with entity_id and other service parameters
-    """
+    entity_id: str = Field(
+        description="The entity_id retrieved from available devices. It must start with domain, followed by dot character."
+    )
+
+
+class ServiceCall(BaseModel):
+    """Service call model."""
+
+    domain: str = Field(description="The domain of the service")
+    service: str = Field(description="The service to be called")
+    service_data: ServiceData = Field(
+        description="The service data object to indicate what to control."
+    )
+
+
+class ExecuteServicesInput(BaseModel):
+    """Input model for execute_services."""
+
+    list: list[ServiceCall]
+
+
+# Global execute_services tool definition for use with LangGraph
+@tool(args_schema=ExecuteServicesInput)
+async def execute_services(list: list[ServiceCall]) -> str:
+    """Use this function to execute service of devices in Home Assistant."""
     # This will be set by the agent when it's created
     if not hasattr(execute_services, "_hass"):
         return "Error: Home Assistant instance not available"
@@ -99,15 +119,11 @@ async def execute_services(service_calls: list[dict]) -> str:
     hass = getattr(execute_services, "_hass")
     results = []
 
-    for service_call in service_calls:
+    for service_call in list:
         try:
-            domain = service_call.get("domain")
-            service = service_call.get("service")
-            service_data = service_call.get("service_data", {})
-
-            if not domain or not service:
-                results.append(f"✗ Missing domain or service in call: {service_call}")
-                continue
+            domain = service_call.domain
+            service = service_call.service
+            service_data = service_call.service_data.model_dump()
 
             # Execute the service call directly
             await hass.services.async_call(domain, service, service_data)
@@ -212,6 +228,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             )
 
         # Create the react agent with tools
+        # TODO: add more tools, eg: web search
         self.react_agent = create_react_agent(model, tools=[execute_services])
 
     @property
@@ -376,46 +393,34 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         _LOGGER.info("LangGraph response: %s", final_message.content)
 
-        # Create a simple mock response for compatibility
-        mock_response = type(
-            "MockChatCompletion",
-            (),
-            {
-                "choices": [
-                    type(
-                        "MockChoice",
-                        (),
-                        {
-                            "message": type(
-                                "MockMessage",
-                                (),
-                                {
-                                    "content": final_message.content,
-                                    "role": "assistant",
-                                },
-                            )(),
-                            "finish_reason": "stop",
-                        },
-                    )()
-                ],
-                "model": self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL),
-                "id": "langgraph",
-                "created": 0,
-                "object": "chat.completion",
-                "usage": type(
-                    "MockUsage",
-                    (),
-                    {
-                        "total_tokens": 0,  # Token counting not available
-                        "completion_tokens": 0,
-                    },
-                )(),
-            },
-        )()
-
-        return OpenAIQueryResponse(
-            response=mock_response, message=mock_response.choices[0].message
+        # Create actual OpenAI ChatCompletion objects instead of mocks
+        message = ChatCompletionMessage(
+            content=final_message.content,
+            role="assistant",
         )
+
+        choice = Choice(
+            finish_reason="stop",
+            index=0,
+            message=message,
+        )
+
+        usage = CompletionUsage(
+            completion_tokens=0,
+            prompt_tokens=0,
+            total_tokens=0,
+        )
+
+        response = ChatCompletion(
+            id="langgraph",
+            choices=[choice],
+            created=0,
+            model=self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL),
+            object="chat.completion",
+            usage=usage,
+        )
+
+        return OpenAIQueryResponse(response=response, message=message)
 
     async def truncate_message_history(
         self, messages, exposed_entities, user_input: conversation.ConversationInput
