@@ -1,6 +1,6 @@
 {
   "domain": "my_openai_conversation",
-  "name": "OpenAI",
+  "name": "My OpenAI Conversation",
   "after_dependencies": [
     "assist_pipeline",
     "intent"
