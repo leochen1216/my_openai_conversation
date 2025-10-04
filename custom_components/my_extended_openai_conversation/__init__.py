@@ -108,33 +108,6 @@ class ExecuteServicesInput(BaseModel):
     list: list[ServiceCall]
 
 
-# Global execute_services tool definition for use with LangGraph
-@tool(args_schema=ExecuteServicesInput)
-async def execute_services(list: list[ServiceCall]) -> str:
-    """Use this function to execute service of devices in Home Assistant."""
-    # This will be set by the agent when it's created
-    if not hasattr(execute_services, "_hass"):
-        return "Error: Home Assistant instance not available"
-
-    hass = getattr(execute_services, "_hass")
-    results = []
-
-    for service_call in list:
-        try:
-            domain = service_call.domain
-            service = service_call.service
-            service_data = service_call.service_data.model_dump()
-
-            # Execute the service call directly
-            await hass.services.async_call(domain, service, service_data)
-            results.append(f"✓ {domain}.{service} executed successfully")
-
-        except Exception as e:
-            results.append(f"✗ Error executing {domain}.{service}: {str(e)}")
-
-    return "\n".join(results)
-
-
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up OpenAI Conversation."""
     await async_setup_services(hass, config)
@@ -193,8 +166,27 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
     def _setup_langgraph_agent(self, base_url: str | None) -> None:
         """Setup LangGraph react agent with tools."""
-        # Set the hass instance on the global execute_services tool
-        setattr(execute_services, "_hass", self.hass)
+
+        # Create execute_services tool as a closure - captures self automatically
+        @tool(args_schema=ExecuteServicesInput)
+        async def execute_services(list: list[ServiceCall]) -> str:
+            """Use this function to execute service of devices in Home Assistant."""
+            results = []
+
+            for service_call in list:
+                try:
+                    domain = service_call.domain
+                    service = service_call.service
+                    service_data = service_call.service_data.model_dump()
+
+                    # Execute the service call directly using self.hass from closure
+                    await self.hass.services.async_call(domain, service, service_data)
+                    results.append(f"✓ {domain}.{service} executed successfully")
+
+                except Exception as e:
+                    results.append(f"✗ Error executing {domain}.{service}: {str(e)}")
+
+            return "\n".join(results)
 
         # Get model configuration from user settings
         model_name = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
@@ -228,7 +220,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             )
 
         # Create the react agent with tools
-        # TODO: add more tools, eg: web search
+        # TODO: add more tools including MCP, eg: web search
         self.react_agent = create_react_agent(model, tools=[execute_services])
 
     @property
