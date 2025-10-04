@@ -15,6 +15,7 @@
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "requirements": [
-    "openai>=1.99.5"
+    "openai>=1.99.5",
+    "pydantic>=2.10.4"
   ]
 }

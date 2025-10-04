@@ -6,16 +6,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import openai
-from openai.types.images_response import ImagesResponse
-from openai.types.responses import (
-    EasyInputMessageParam,
-    Response,
-    ResponseInputMessageContentListParam,
-    ResponseInputParam,
-    ResponseInputTextParam,
-)
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import (
@@ -31,12 +22,26 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import (
     config_validation as cv,
+)
+from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
+)
+from homeassistant.helpers import (
     selector,
 )
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.typing import ConfigType
+from openai.types.images_response import ImagesResponse
+from openai.types.responses import (
+    EasyInputMessageParam,
+    Response,
+    ResponseInputMessageContentListParam,
+    ResponseInputParam,
+    ResponseInputTextParam,
+)
 
 from .const import (
     CONF_API_BASE,
