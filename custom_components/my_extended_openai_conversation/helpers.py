@@ -1,19 +1,18 @@
-from abc import ABC, abstractmethod
-from datetime import timedelta
-from functools import partial
 import logging
 import os
 import re
 import sqlite3
 import time
+from abc import ABC, abstractmethod
+from datetime import timedelta
+from functools import partial
 from typing import Any
 from urllib import parse
 
-from bs4 import BeautifulSoup
-from openai import AsyncAzureOpenAI, AsyncOpenAI
+import homeassistant.util.dt as dt_util
 import voluptuous as vol
 import yaml
-
+from bs4 import BeautifulSoup
 from homeassistant.components import (
     automation,
     conversation,
@@ -43,7 +42,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template
-import homeassistant.util.dt as dt_util
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 from .const import CONF_PAYLOAD_TEMPLATE, DOMAIN, EVENT_AUTOMATION_REGISTERED
 from .exceptions import (
@@ -391,7 +390,7 @@ class NativeFunctionExecutor(FunctionExecutor):
         exposed_entities,
     ):
         user = await hass.auth.async_get_user(user_input.context.user_id)
-        return {'name': user.name if user and hasattr(user, 'name') else 'Unknown'}
+        return {"name": user.name if user and hasattr(user, "name") else "Unknown"}
 
     async def get_statistics(
         self,
@@ -448,9 +447,9 @@ class ScriptFunctionExecutor(FunctionExecutor):
         script = Script(
             hass,
             function["sequence"],
-            "extended_openai_conversation",
+            "my_extended_openai_conversation",
             DOMAIN,
-            running_description="[extended_openai_conversation] function",
+            running_description="[my_extended_openai_conversation] function",
             logger=_LOGGER,
         )
 

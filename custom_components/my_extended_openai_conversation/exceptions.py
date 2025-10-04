@@ -1,4 +1,5 @@
-"""The exceptions used by Extended OpenAI Conversation."""
+"""The exceptions used by My Extended OpenAI Conversation."""
+
 from homeassistant.exceptions import HomeAssistantError
 
 

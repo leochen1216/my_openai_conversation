@@ -1,4 +1,5 @@
-"""Config flow for OpenAI Conversation integration."""
+"""Config flow for My Extended OpenAI Conversation integration."""
+
 from __future__ import annotations
 
 import logging
@@ -6,10 +7,8 @@ import types
 from types import MappingProxyType
 from typing import Any
 
-from openai._exceptions import APIConnectionError, AuthenticationError
 import voluptuous as vol
 import yaml
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -24,6 +23,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
     TemplateSelector,
 )
+from openai._exceptions import APIConnectionError, AuthenticationError
 
 from .const import (
     CONF_API_VERSION,
@@ -121,7 +121,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for OpenAI Conversation."""
+    """Handle a config flow for My Extended OpenAI Conversation."""
 
     VERSION = 1
 
@@ -163,7 +163,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlow(config_entries.OptionsFlow):
-    """OpenAI config flow options handler."""
+    """Custom OpenAI config flow options handler."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""

@@ -1,19 +1,9 @@
-"""The OpenAI Conversation integration."""
+"""The My Extended OpenAI Conversation integration."""
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Literal
-
-from openai import AsyncAzureOpenAI, AsyncOpenAI
-from openai._exceptions import AuthenticationError, OpenAIError
-from openai.types.chat.chat_completion import (
-    ChatCompletion,
-    ChatCompletionMessage,
-    Choice,
-)
-import yaml
 
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
@@ -27,7 +17,11 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import (
     config_validation as cv,
+)
+from homeassistant.helpers import (
     entity_registry as er,
+)
+from homeassistant.helpers import (
     intent,
     template,
 )
@@ -35,45 +29,46 @@ from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import ulid
 
+# LangChain imports
+from langchain import init_chat_model
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+)
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai._exceptions import AuthenticationError, OpenAIError
+from openai.types.chat.chat_completion import (
+    ChatCompletion,
+)
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+
 from .const import (
     CONF_API_VERSION,
     CONF_ATTACH_USERNAME,
     CONF_BASE_URL,
     CONF_CHAT_MODEL,
-    CONF_CONTEXT_THRESHOLD,
     CONF_CONTEXT_TRUNCATE_STRATEGY,
-    CONF_FUNCTIONS,
-    CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
     CONF_MAX_TOKENS,
     CONF_ORGANIZATION,
     CONF_PROMPT,
     CONF_SKIP_AUTHENTICATION,
     CONF_TEMPERATURE,
     CONF_TOP_P,
-    CONF_USE_TOOLS,
     DEFAULT_ATTACH_USERNAME,
     DEFAULT_CHAT_MODEL,
-    DEFAULT_CONF_FUNCTIONS,
-    DEFAULT_CONTEXT_THRESHOLD,
     DEFAULT_CONTEXT_TRUNCATE_STRATEGY,
-    DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
     DEFAULT_MAX_TOKENS,
     DEFAULT_PROMPT,
     DEFAULT_SKIP_AUTHENTICATION,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
-    DEFAULT_USE_TOOLS,
     DOMAIN,
     EVENT_CONVERSATION_FINISHED,
 )
-from .exceptions import (
-    FunctionLoadFailed,
-    FunctionNotFound,
-    InvalidFunction,
-    ParseArgumentsFailed,
-    TokenLengthExceededError,
-)
-from .helpers import get_function_executor, is_azure, validate_authentication
+from .helpers import is_azure, validate_authentication
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -83,6 +78,45 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 # hass.data key for agent.
 DATA_AGENT = "agent"
+
+
+# Global execute_services tool definition for use with LangGraph
+@tool
+async def execute_services(service_calls: list[dict]) -> str:
+    """Execute service calls in Home Assistant.
+
+    Args:
+        service_calls: Array of service calls with domain, service, and service_data.
+                      Each service call should have:
+                      - domain: The domain of the service (e.g., 'light', 'switch')
+                      - service: The service to be called (e.g., 'turn_on', 'turn_off')
+                      - service_data: Object with entity_id and other service parameters
+    """
+    # This will be set by the agent when it's created
+    if not hasattr(execute_services, "_hass"):
+        return "Error: Home Assistant instance not available"
+
+    hass = getattr(execute_services, "_hass")
+    results = []
+
+    for service_call in service_calls:
+        try:
+            domain = service_call.get("domain")
+            service = service_call.get("service")
+            service_data = service_call.get("service_data", {})
+
+            if not domain or not service:
+                results.append(f"✗ Missing domain or service in call: {service_call}")
+                continue
+
+            # Execute the service call directly
+            await hass.services.async_call(domain, service, service_data)
+            results.append(f"✓ {domain}.{service} executed successfully")
+
+        except Exception as e:
+            results.append(f"✗ Error executing {domain}.{service}: {str(e)}")
+
+    return "\n".join(results)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -137,23 +171,48 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         self.entry = entry
         self.history: dict[str, list[dict]] = {}
         base_url = entry.data.get(CONF_BASE_URL)
+
+        # Initialize LangGraph react agent
+        self._setup_langgraph_agent(base_url)
+
+    def _setup_langgraph_agent(self, base_url: str | None) -> None:
+        """Setup LangGraph react agent with tools."""
+        # Set the hass instance on the global execute_services tool
+        setattr(execute_services, "_hass", self.hass)
+
+        # Get model configuration from user settings
+        model_name = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
+        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
+
+        # Determine the model provider and configuration
         if is_azure(base_url):
-            self.client = AsyncAzureOpenAI(
-                api_key=entry.data[CONF_API_KEY],
+            model = init_chat_model(
+                model=model_name,
+                model_provider="azure_openai",
+                api_key=self.entry.data[CONF_API_KEY],
                 azure_endpoint=base_url,
-                api_version=entry.data.get(CONF_API_VERSION),
-                organization=entry.data.get(CONF_ORGANIZATION),
-                http_client=get_async_client(hass),
+                api_version=self.entry.data.get(CONF_API_VERSION),
+                organization=self.entry.data.get(CONF_ORGANIZATION),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                model_kwargs={"top_p": top_p},
             )
         else:
-            self.client = AsyncOpenAI(
-                api_key=entry.data[CONF_API_KEY],
+            model = init_chat_model(
+                model=model_name,
+                model_provider="openai",
+                api_key=self.entry.data[CONF_API_KEY],
                 base_url=base_url,
-                organization=entry.data.get(CONF_ORGANIZATION),
-                http_client=get_async_client(hass),
+                organization=self.entry.data.get(CONF_ORGANIZATION),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                model_kwargs={"top_p": top_p},
             )
-        # Cache current platform data which gets added to each request (caching done by library)
-        _ = hass.async_add_executor_job(self.client.platform_headers)
+
+        # Create the react agent with tools
+        self.react_agent = create_react_agent(model, tools=[execute_services])
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -284,23 +343,79 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             )
         return exposed_entities
 
-    def get_functions(self):
-        try:
-            function = self.entry.options.get(CONF_FUNCTIONS)
-            result = yaml.safe_load(function) if function else DEFAULT_CONF_FUNCTIONS
-            if result:
-                for setting in result:
-                    function_executor = get_function_executor(
-                        setting["function"]["type"]
-                    )
-                    setting["function"] = function_executor.to_arguments(
-                        setting["function"]
-                    )
-            return result
-        except (InvalidFunction, FunctionNotFound) as e:
-            raise e
-        except:
-            raise FunctionLoadFailed()
+    async def _query_with_langgraph(
+        self,
+        user_input: conversation.ConversationInput,
+        messages,
+        exposed_entities,
+        n_requests,
+    ) -> OpenAIQueryResponse:
+        """Process a query using LangGraph react agent."""
+
+        # Convert messages to LangGraph format
+        langchain_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                langchain_messages.append(SystemMessage(content=msg["content"]))
+            elif msg["role"] == "user":
+                langchain_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                langchain_messages.append(AIMessage(content=msg.get("content", "")))
+
+        _LOGGER.info(
+            "LangGraph prompt: %s",
+            [msg.content for msg in langchain_messages],
+        )
+
+        # Invoke the react agent - it handles tool execution automatically
+        agent_input = {"messages": langchain_messages}
+        result = await self.react_agent.ainvoke(agent_input)
+
+        # Get the final message from the agent
+        final_message = result["messages"][-1]
+
+        _LOGGER.info("LangGraph response: %s", final_message.content)
+
+        # Create a simple mock response for compatibility
+        mock_response = type(
+            "MockChatCompletion",
+            (),
+            {
+                "choices": [
+                    type(
+                        "MockChoice",
+                        (),
+                        {
+                            "message": type(
+                                "MockMessage",
+                                (),
+                                {
+                                    "content": final_message.content,
+                                    "role": "assistant",
+                                },
+                            )(),
+                            "finish_reason": "stop",
+                        },
+                    )()
+                ],
+                "model": self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL),
+                "id": "langgraph",
+                "created": 0,
+                "object": "chat.completion",
+                "usage": type(
+                    "MockUsage",
+                    (),
+                    {
+                        "total_tokens": 0,  # Token counting not available
+                        "completion_tokens": 0,
+                    },
+                )(),
+            },
+        )()
+
+        return OpenAIQueryResponse(
+            response=mock_response, message=mock_response.choices[0].message
+        )
 
     async def truncate_message_history(
         self, messages, exposed_entities, user_input: conversation.ConversationInput
@@ -331,172 +446,10 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         exposed_entities,
         n_requests,
     ) -> OpenAIQueryResponse:
-        """Process a sentence."""
-        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
-        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
-        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        use_tools = self.entry.options.get(CONF_USE_TOOLS, DEFAULT_USE_TOOLS)
-        context_threshold = self.entry.options.get(
-            CONF_CONTEXT_THRESHOLD, DEFAULT_CONTEXT_THRESHOLD
+        """Process a sentence using LangChain."""
+        return await self._query_with_langgraph(
+            user_input, messages, exposed_entities, n_requests
         )
-        functions = list(map(lambda s: s["spec"], self.get_functions()))
-        function_call = "auto"
-        if n_requests == self.entry.options.get(
-            CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-            DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-        ):
-            function_call = "none"
-
-        tool_kwargs = {"functions": functions, "function_call": function_call}
-        if use_tools:
-            tool_kwargs = {
-                "tools": [{"type": "function", "function": func} for func in functions],
-                "tool_choice": function_call,
-            }
-
-        if len(functions) == 0:
-            tool_kwargs = {}
-
-        _LOGGER.info("Prompt for %s: %s", model, json.dumps(messages))
-
-        response: ChatCompletion = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            temperature=temperature,
-            user=user_input.conversation_id,
-            **tool_kwargs,
-        )
-
-        _LOGGER.info("Response %s", json.dumps(response.model_dump(exclude_none=True)))
-
-        if response.usage.total_tokens > context_threshold:
-            await self.truncate_message_history(messages, exposed_entities, user_input)
-
-        choice: Choice = response.choices[0]
-        message = choice.message
-
-        if choice.finish_reason == "function_call":
-            return await self.execute_function_call(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "tool_calls":
-            return await self.execute_tool_calls(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "length":
-            raise TokenLengthExceededError(response.usage.completion_tokens)
-
-        return OpenAIQueryResponse(response=response, message=message)
-
-    async def execute_function_call(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        function_name = message.function_call.name
-        function = next(
-            (s for s in self.get_functions() if s["spec"]["name"] == function_name),
-            None,
-        )
-        if function is not None:
-            return await self.execute_function(
-                user_input,
-                messages,
-                message,
-                exposed_entities,
-                n_requests,
-                function,
-            )
-        raise FunctionNotFound(function_name)
-
-    async def execute_function(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-        function,
-    ) -> OpenAIQueryResponse:
-        function_executor = get_function_executor(function["function"]["type"])
-
-        try:
-            arguments = json.loads(message.function_call.arguments)
-        except json.decoder.JSONDecodeError as err:
-            raise ParseArgumentsFailed(message.function_call.arguments) from err
-
-        result = await function_executor.execute(
-            self.hass, function["function"], arguments, user_input, exposed_entities
-        )
-
-        messages.append(
-            {
-                "role": "function",
-                "name": message.function_call.name,
-                "content": str(result),
-            }
-        )
-        return await self.query(user_input, messages, exposed_entities, n_requests)
-
-    async def execute_tool_calls(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        message: ChatCompletionMessage,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        messages.append(message.model_dump(exclude_none=True))
-        for tool in message.tool_calls:
-            function_name = tool.function.name
-            function = next(
-                (s for s in self.get_functions() if s["spec"]["name"] == function_name),
-                None,
-            )
-            if function is not None:
-                result = await self.execute_tool_function(
-                    user_input,
-                    tool,
-                    exposed_entities,
-                    function,
-                )
-
-                messages.append(
-                    {
-                        "tool_call_id": tool.id,
-                        "role": "tool",
-                        "name": function_name,
-                        "content": str(result),
-                    }
-                )
-            else:
-                raise FunctionNotFound(function_name)
-        return await self.query(user_input, messages, exposed_entities, n_requests)
-
-    async def execute_tool_function(
-        self,
-        user_input: conversation.ConversationInput,
-        tool,
-        exposed_entities,
-        function,
-    ) -> OpenAIQueryResponse:
-        function_executor = get_function_executor(function["function"]["type"])
-
-        try:
-            arguments = json.loads(tool.function.arguments)
-        except json.decoder.JSONDecodeError as err:
-            raise ParseArgumentsFailed(tool.function.arguments) from err
-
-        result = await function_executor.execute(
-            self.hass, function["function"], arguments, user_input, exposed_entities
-        )
-        return result
 
 
 class OpenAIQueryResponse:
