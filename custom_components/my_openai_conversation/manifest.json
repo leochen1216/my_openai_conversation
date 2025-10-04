@@ -1,6 +1,7 @@
 {
   "domain": "my_openai_conversation",
   "name": "My OpenAI Conversation",
+  "version": "0.1.0",
   "after_dependencies": [
     "assist_pipeline",
     "intent"
