@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from typing import Literal
 
@@ -321,10 +323,40 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             {
                 "ha_name": self.hass.config.location_name,
                 "exposed_entities": exposed_entities,
+                "exposed_entities_csv": self._format_entities_as_csv(exposed_entities),
                 "current_device_id": user_input.device_id,
             },
             parse_result=False,
         )
+
+    def _format_entities_as_csv(self, exposed_entities) -> str:
+        """Format exposed entities as a CSV string."""
+        if not exposed_entities:
+            return ""
+
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+
+        # Write header
+        writer.writerow(["entity_id", "name", "state", "aliases"])
+
+        # Write data rows
+        for entity in exposed_entities:
+            aliases_str = (
+                " | ".join(entity.get("aliases", [])) if entity.get("aliases") else ""
+            )
+            writer.writerow(
+                [
+                    entity.get("entity_id", ""),
+                    entity.get("name", ""),
+                    entity.get("state", ""),
+                    aliases_str,
+                ]
+            )
+
+        csv_content = output.getvalue()
+        output.close()
+        return csv_content.rstrip("\n")  # Remove trailing newline
 
     def get_exposed_entities(self):
         states = [

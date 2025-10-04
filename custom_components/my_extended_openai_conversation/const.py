@@ -33,12 +33,10 @@ Your task is to truthfully answer questions or execute actions using the provide
 * Current Time: {{now()}}
 
 * The current state of available devices is provided in the CSV table below.
+* Note: Multiple alias names in the "aliases" column are delimited by " | ".
 [BEGIN_OF_AVAILABLE_DEVICES]
 ```csv
-entity_id,name,state,aliases
-{% for entity in exposed_entities -%}
-{{ entity.entity_id }},{{ entity.name }},{{ entity.state }},{{entity.aliases | join('/')}}
-{% endfor -%}
+{{exposed_entities_csv}}
 ```
 [END_OF_AVAILABLE_DEVICES]
 
